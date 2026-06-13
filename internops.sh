@@ -18,6 +18,7 @@
 #    ./internops.sh test                     Run Jest + E2E audit suites
 #    ./internops.sh ai                       AI provider status + sample chat
 #    ./internops.sh demo                     Run end-to-end demo flows
+#    ./internops.sh dev-light [dir]           Run with PGlite — no Docker, no PG server
 #    ./internops.sh reset                    Wipe volumes, images, secrets
 #    ./internops.sh doctor                  Run health diagnostics
 #    ./internops.sh help                     Show this help
@@ -615,7 +616,80 @@ except: pass
 }
 
 # -----------------------------------------------------------------------------
-# 14. reset
+# 14. dev-light
+# -----------------------------------------------------------------------------
+# Run the backend with PGlite (PostgreSQL in WASM) — no Docker, no server.
+# Uses @electric-sql/pglite to embed a real PostgreSQL engine in-process.
+# All PostgreSQL features work (ENUMs, JSONB, WITH RECURSIVE, ILIKE, etc.).
+# Data persists in ./pglite-data/ between runs.
+cmd_dev_light() {
+  step "PGlite — zero-Docker dev mode"
+
+  local PGLITE_DIR="${1:-./pglite-data}"
+  export PGLITE_DB_DIR="$PGLITE_DIR"
+
+  require node "Node.js 18+ required"
+  require openssl "needed for JWT secret generation"
+
+  # Check node_modules
+  if [[ ! -d backend/node_modules ]]; then
+    info "Installing backend dependencies..."
+    (cd backend && npm install) || {
+      err "npm install failed"
+      return 1
+    }
+  fi
+
+  # Create .env with a generated JWT secret if missing
+  if [[ ! -f backend/.env ]]; then
+    info "Creating backend/.env with generated JWT secret..."
+    cat > backend/.env <<ENVEOF
+NODE_ENV=development
+PORT=5000
+JWT_SECRET=$(openssl rand -base64 48 | tr -d '\n')
+JWT_ACCESS_SECRET=$(openssl rand -base64 48 | tr -d '\n')
+JWT_REFRESH_SECRET=$(openssl rand -base64 48 | tr -d '\n')
+CSRF_SECRET=$(openssl rand -base64 48 | tr -d '\n')
+API_KEY=$(openssl rand -base64 48 | tr -d '\n')
+PGLITE_DB_DIR=$PGLITE_DIR
+ENVEOF
+    ok "Created backend/.env"
+  fi
+
+  step "Running migrations (PGlite)..."
+  (cd backend && node src/db/migrate.js) || {
+    err "Migrations failed"
+    return 1
+  }
+  ok "Migrations applied"
+
+  step "Seeding admin user..."
+  (cd backend && node seeds/seed.js) || {
+    err "Seed failed"
+    return 1
+  }
+  ok "Admin seeded (admin@internops.com / Admin@123)"
+
+  if confirm "Seed the demo dataset (16 users, 5 projects, 176 attendance, 21 ratings)?"; then
+    (cd backend && node seeds/seedDemo.js) || {
+      err "Demo seed failed"
+      return 1
+    }
+    ok "Demo data seeded"
+  fi
+
+  step "Starting backend (PGlite mode)..."
+  info "Backend will be available at http://localhost:5000"
+  info "Swagger docs at http://localhost:5000/docs"
+  info "Admin login: admin@internops.com / Admin@123"
+  echo ""
+  # Trap SIGINT so we can show a friendly message
+  trap 'echo ""; ok "Backend stopped. Data preserved in $PGLITE_DIR"; exit 0' INT
+  (cd backend && node --watch src/app.js)
+}
+
+# -----------------------------------------------------------------------------
+# 15. reset
 # -----------------------------------------------------------------------------
 # Wipe containers, volumes, networks, and (optionally) images. Requires
 # explicit --yes because it is destructive.
@@ -644,7 +718,7 @@ cmd_reset() {
 }
 
 # -----------------------------------------------------------------------------
-# 15. doctor
+# 16. doctor
 # -----------------------------------------------------------------------------
 # Non-destructive health diagnostics. Checks every dependency and reports.
 cmd_doctor() {
@@ -702,7 +776,7 @@ cmd_doctor() {
 }
 
 # -----------------------------------------------------------------------------
-# 16. help
+# 17. help
 # -----------------------------------------------------------------------------
 cmd_help() {
   banner
@@ -714,15 +788,16 @@ cmd_help() {
 
   Commands
   --------
-    up [env]            Bring up the full stack
-    down                Stop everything
-    restart [env]       Restart all services
+    up [env]            Bring up the full stack (requires Docker)
+    down                Stop everything (requires Docker)
+    restart [env]       Restart all services (requires Docker)
     status              Show container health + URLs
     logs [service]      Tail logs (default: all services)
     seed                Run migrations + demo seed
     test                Run Jest + E2E audit + ultimate E2E
     ai                  Show AI provider chain + sample chat
     demo                Run end-to-end flows against the live stack
+    dev-light [dir]     Run with PGlite — PostgreSQL in WASM, no Docker needed!
     doctor              Run health diagnostics
     reset               Wipe everything (containers, volumes, secrets)
     help                Show this help
@@ -749,19 +824,20 @@ cmd_help() {
     internops.sh test               # run all tests
     internops.sh ai                 # AI status + sample chat
     internops.sh demo               # live E2E demo
+    internops.sh dev-light          # run with PGlite — no Docker, no PG server
     internops.sh down               # stop everything
     internops.sh reset              # nuke + restart
 USAGE
 }
 
 # -----------------------------------------------------------------------------
-# 17. Argv parsing
+# 18. Argv parsing
 # -----------------------------------------------------------------------------
 COMMAND=""
 ENV_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    up|down|restart|status|logs|seed|test|ai|demo|reset|doctor|help)
+    up|down|restart|status|logs|seed|test|ai|demo|dev-light|dev_local|reset|doctor|help)
       COMMAND="$1"; shift ;;
     -y|--yes)   ASSUME_YES=1; shift ;;
     -v|--verbose) VERBOSE=1; shift ;;
@@ -790,6 +866,7 @@ case "$COMMAND" in
   test)     cmd_test ;;
   ai)       cmd_ai ;;
   demo)     cmd_demo ;;
+  dev-light|dev_local) cmd_dev_light "${EXTRA_ARGS[@]:-}" ;;
   reset)    cmd_reset ;;
   doctor)   cmd_doctor ;;
   help|"")  cmd_help ;;

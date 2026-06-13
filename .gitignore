@@ -124,6 +124,9 @@ Quintern/
 /tmp/
 tmp/
 
+# PGlite embedded database (PostgreSQL in WASM) — local dev only
+pglite-data/
+
 # Dev debug scripts (NEVER commit)
 /backend/test-ai.js
 /backend/test-ai-new.js

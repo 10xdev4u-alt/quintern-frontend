@@ -15,6 +15,7 @@ const accessSecret = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET;
 const refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
 
 module.exports = {
+  pgliteDbDir: process.env.PGLITE_DB_DIR,
   port: parseInt(process.env.PORT, 10) || 5000,
   host: process.env.HOST || '0.0.0.0',
   nodeEnv: process.env.NODE_ENV,
@@ -56,18 +57,13 @@ module.exports = {
     apiKey: process.env.UPTOSKILLS_API_KEY || '',
   },
   email: {
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT, 10) || 587,
-    secure: process.env.SMTP_SECURE === 'true',
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-    apiKey: process.env.EMAIL_API_KEY,
-    from: process.env.EMAIL_FROM || 'noreply@internops.com',
-    provider: process.env.EMAIL_PROVIDER || 'smtp',
+    // Resend.com is the email provider. Get a free API key at resend.com.
+    // Free tier: 3,000 emails/month, 100 emails/day — plenty for a hobby project.
+    resendApiKey: process.env.RESEND_API_KEY,
+    from: process.env.EMAIL_FROM || 'noreply@quintern.com',
     retryMax: parseInt(process.env.EMAIL_RETRY_MAX, 10) || 3,
     rateLimitPerRecipient: parseInt(process.env.EMAIL_RATE_LIMIT, 10) || 5,
     rateLimitWindowMs: parseInt(process.env.EMAIL_RATE_WINDOW, 10) || 60000,
-    bounceCheckEnabled: process.env.EMAIL_BOUNCE_CHECK === 'true',
   },
   appUrl: process.env.APP_URL || 'http://localhost:5173',
   isProduction: process.env.NODE_ENV === 'production',

@@ -1,20 +1,31 @@
-﻿const nodemailer = require('nodemailer');
+'use strict';
+// =============================================================================
+//  Email service — Resend API (replaces legacy nodemailer/SMTP)
+// =============================================================================
+//  Uses Resend (resend.com) for transactional email delivery.
+//  Free tier: 3,000 emails/month, 100 emails/day.
+//
+//  When RESEND_API_KEY is not set, falls back to console.log so local dev
+//  never crashes on email sends — just check the server logs.
+// =============================================================================
+
 const config = require('../config');
 const path = require('path');
 const fs = require('fs');
 
+// ---- In-memory rate-limit + bounce tracking ----
 const rateLimitMap = new Map();
 const bounceList = new Set();
-
 const metrics = { sent: 0, failed: 0, bounced: 0, retried: 0 };
 
 class EmailService {
   constructor() {
-    this.transporter = null;
+    this._resend = null;
     this.templates = {};
     this._loadTemplates();
   }
 
+  // ── Template loading (unchanged) ──────────────────────────────────────────
   _loadTemplates() {
     const dir = path.join(__dirname, 'templates');
     if (!fs.existsSync(dir)) return;
@@ -31,26 +42,25 @@ class EmailService {
     }
   }
 
-  getTransporter() {
-    if (this.transporter) return this.transporter;
-    const hasValidCreds =
-      config.email.user &&
-      config.email.pass &&
-      config.email.pass !== 'your-smtp-password' &&
-      !config.email.pass.startsWith('your-');
-    if (!config.email.host || !hasValidCreds) {
-      console.warn('[Email] SMTP not configured – using console fallback');
+  // ── Resend client (lazy init) ─────────────────────────────────────────────
+  async _getClient() {
+    if (this._resend) return this._resend;
+    if (!config.email.resendApiKey) return null;
+
+    // Dynamic import handles both CJS and ESM environments. If Resend ships
+    // as ESM-only (common for modern SDKs), `require()` would throw — but
+    // `import()` works everywhere.
+    try {
+      const { Resend } = await import('resend');
+      this._resend = new Resend(config.email.resendApiKey);
+      return this._resend;
+    } catch (e) {
+      console.warn('[Email] Failed to load Resend client:', e.message);
       return null;
     }
-    this.transporter = nodemailer.createTransport({
-      host: config.email.host,
-      port: config.email.port,
-      secure: config.email.secure,
-      auth: { user: config.email.user, pass: config.email.pass },
-    });
-    return this.transporter;
   }
 
+  // ── Rate limit ────────────────────────────────────────────────────────────
   _checkRateLimit(to) {
     const now = Date.now();
     const windowMs = config.email.rateLimitWindowMs || 60000;
@@ -64,27 +74,33 @@ class EmailService {
     rateLimitMap.set(to, timestamps);
   }
 
+  // ── Bounce check ──────────────────────────────────────────────────────────
   _checkBounce(to) {
-    if (config.email.bounceCheckEnabled && bounceList.has(to)) {
+    if (bounceList.has(to)) {
       throw new Error(`Bounced address suppressed: ${to}`);
     }
   }
 
+  // ── Template rendering ────────────────────────────────────────────────────
   _render(templateName, data) {
     const tpl = this.templates[templateName];
     if (!tpl) return { html: null, text: null };
+
     const render = (str) => {
       if (!str) return null;
       return str
         .replace(/\{\{(\w+)\}\}/g, (_, k) => (data[k] != null ? data[k] : ''))
-        .replace(/\{\{#if (\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_, k, content) =>
-          data[k]
-            ? content.replace(/\{\{(\w+)\}\}/g, (__, kk) =>
-                data[kk] != null ? data[kk] : ''
-              )
-            : ''
+        .replace(
+          /\{\{#if (\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g,
+          (_, k, content) =>
+            data[k]
+              ? content.replace(/\{\{(\w+)\}\}/g, (__, kk) =>
+                  data[kk] != null ? data[kk] : ''
+                )
+              : ''
         );
     };
+
     return {
       html: render(tpl.html),
       text: render(tpl.txt),
@@ -93,16 +109,13 @@ class EmailService {
 
   _stripHtml(html) {
     return html
-      ? html
-          .replace(/<[^>]*>/g, '')
-          .replace(/\s+/g, ' ')
-          .trim()
+      ? html.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
       : '';
   }
 
+  // ── Core send ─────────────────────────────────────────────────────────────
   async send({ to, subject, template, data, html, text }) {
-    if (!to || !subject)
-      throw new Error('Missing required fields: to, subject');
+    if (!to || !subject) throw new Error('Missing required fields: to, subject');
     this._checkBounce(to);
     this._checkRateLimit(to);
 
@@ -119,25 +132,19 @@ class EmailService {
       textContent = ' ';
     }
 
-    const mailOptions = {
-      from: config.email.from,
-      to,
-      subject,
-      text: textContent || (htmlContent ? this._stripHtml(htmlContent) : ''),
-      html: htmlContent || undefined,
-    };
+    const mailFrom = config.email.from || 'noreply@quintern.com';
 
-    const transporter = this.getTransporter();
-    if (!transporter) {
-      console.log(`[Email] Placeholder -> To: ${to}, Subject: "${subject}"`);
+    const client = await this._getClient();
+    if (!client) {
+      // ── Console fallback (no API key configured) ──
+      console.log(
+        `[Email] Placeholder -> To: ${to}, Subject: "${subject}" (set RESEND_API_KEY to send real emails)`
+      );
       metrics.sent++;
-      return {
-        messageId: 'console-' + Date.now(),
-        accepted: [to],
-        rejected: [],
-      };
+      return { messageId: 'console-' + Date.now(), accepted: [to], rejected: [] };
     }
 
+    // ── Resend send with retry ──
     const maxRetries = config.email.retryMax || 3;
     let lastError;
 
@@ -148,19 +155,34 @@ class EmailService {
           const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
           await new Promise((r) => setTimeout(r, delay));
         }
-        const info = await transporter.sendMail(mailOptions);
-        metrics.sent++;
-        if (info.rejected && info.rejected.length > 0) {
-          info.rejected.forEach((addr) => bounceList.add(addr));
-          metrics.bounced += info.rejected.length;
+
+        const { data: result, error } = await client.emails.send({
+          from: mailFrom,
+          to,
+          subject,
+          text: textContent || (htmlContent ? this._stripHtml(htmlContent) : ''),
+          html: htmlContent || undefined,
+        });
+
+        if (error) {
+          // Resend returns errors as a structured object, not a thrown exception
+          throw new Error(error.message || 'Resend API error');
         }
-        return info;
+
+        metrics.sent++;
+        return {
+          messageId: result?.id || 'resend-' + Date.now(),
+          accepted: [to],
+          rejected: [],
+        };
       } catch (err) {
         lastError = err;
         console.error(
           `[Email] Attempt ${attempt + 1}/${maxRetries + 1} failed for ${to}: ${err.message}`
         );
-        if (err.responseCode >= 500 || /55[0135]/.test(err.message)) {
+
+        // Treat 4xx as non-retryable (bad address, invalid domain, etc.)
+        if (err.statusCode && err.statusCode < 500) {
           bounceList.add(to);
           metrics.bounced++;
           break;
@@ -175,8 +197,11 @@ class EmailService {
     throw lastError || new Error(`Failed to send email to ${to}`);
   }
 
+  // ── Convenience methods ───────────────────────────────────────────────────
   async sendPasswordReset(email, resetToken) {
-    const resetLink = `${process.env.APP_URL || 'http://localhost:5173'}/reset-password#token=${encodeURIComponent(resetToken)}`;
+    const resetLink = `${
+      process.env.APP_URL || 'http://localhost:5173'
+    }/reset-password#token=${encodeURIComponent(resetToken)}`;
     return this.send({
       to: email,
       subject: 'Quintern - Password Reset Request',
@@ -186,7 +211,9 @@ class EmailService {
   }
 
   async sendAccountVerification(email, verificationToken) {
-    const verifyLink = `${process.env.APP_URL || 'http://localhost:5173'}/verify-email?token=${verificationToken}`;
+    const verifyLink = `${
+      process.env.APP_URL || 'http://localhost:5173'
+    }/verify-email?token=${verificationToken}`;
     return this.send({
       to: email,
       subject: 'Quintern - Verify Your Email',
@@ -204,6 +231,7 @@ class EmailService {
     });
   }
 
+  // ── Metrics & admin ───────────────────────────────────────────────────────
   getMetrics() {
     return { ...metrics };
   }

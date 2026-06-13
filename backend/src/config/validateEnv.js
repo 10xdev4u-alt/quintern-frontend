@@ -1,7 +1,13 @@
 const REQUIRED_VARS = [
   { name: 'JWT_SECRET', minLength: 16 },
-  { name: 'DATABASE_URL', minLength: 1 },
 ];
+
+// DATABASE_URL is required UNLESS we're running in PGlite mode (PostgreSQL in WASM).
+// PGlite is activated by setting the PGLITE_DB_DIR environment variable.
+// This allows `./internops.sh dev-light` to work without a real PostgreSQL server.
+if (!process.env.PGLITE_DB_DIR) {
+  REQUIRED_VARS.push({ name: 'DATABASE_URL', minLength: 1 });
+}
 
 const OPTIONAL_VARS = [
   { name: 'JWT_ACCESS_SECRET', minLength: 16 },
