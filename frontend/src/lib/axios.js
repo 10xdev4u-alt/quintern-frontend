@@ -6,7 +6,7 @@ import { queryClient } from './queryClient';
 // would trigger CORS preflights and tell the server to look for a CSRF cookie
 // that we never set.
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_BASE || '/api',
   withCredentials: false,
   timeout: 30000,
 });
