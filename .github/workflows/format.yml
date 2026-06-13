@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -28,45 +28,14 @@ jobs:
           node-version: 22
 
       - name: Run Prettier check
-        id: check
-        run: |
-          npx --yes prettier@3 --check . 2>&1 | tee prettier.log || echo "::set-output name=failed::true"
-          echo "FAILED=$(grep -c 'Code style issues' prettier.log || echo 0)" >> $GITHUB_OUTPUT
         env:
           CI: true
-
-      - name: Annotate changed files (PR only)
-        if: github.event_name == 'pull_request' && steps.check.outputs.failed == '1'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const log = fs.readFileSync('prettier.log', 'utf8');
-            const files = [...log.matchAll(/([^\s]+\.(?:js|jsx|ts|tsx|css|md|json|yml|yaml))/g)]
-              .map(m => m[1]).filter(f => f !== 'prettier.log');
-            if (files.length === 0) {
-              core.info('No files identified; please re-run Prettier locally.');
-              return;
-            }
-            const body = [
-              '## ⚠️ Prettier — code style issues',
-              '',
-              'Run `npx prettier --write .` locally and commit the changes.',
-              '',
-              '```',
-              ...files.slice(0, 30),
-              '```',
-              files.length > 30 ? `\n…and ${files.length - 30} more` : ''
-            ].join('\n');
-            github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body
-            });
-
-      - name: Fail when unformatted
-        if: steps.check.outputs.failed == '1'
         run: |
-          echo "::error::Prettier found unformatted files. Run 'npx prettier --write .' locally and push again."
-          exit 1
+          set -o pipefail
+          npx --yes prettier@3 --check . > prettier.log 2>&1 || {
+            echo "::group::Prettier output (first 80 lines)"
+            head -80 prettier.log || true
+            echo "::endgroup::"
+            echo "::error::Prettier found unformatted files. Run 'npx prettier --write .' locally and push again."
+            exit 1
+          }
