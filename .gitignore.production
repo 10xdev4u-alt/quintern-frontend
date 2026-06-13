@@ -1,6 +1,0 @@
-# Keep ALL production secrets out of version control.
-.env.production
-.env.production.local
-.env.production.*.local
-secrets/
-!secrets/.gitkeep

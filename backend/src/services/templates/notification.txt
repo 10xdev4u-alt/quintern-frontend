@@ -1,7 +1,0 @@
-Quintern - {{title}}
-
-{{message}}
-
-{{#if actionUrl}}Follow this link: {{actionUrl}}{{/if}}
-
-Quintern - Internal Operations Platform
