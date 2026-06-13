@@ -173,6 +173,9 @@ jobs:
       - name: Run migrations on smoke DB
         run: cd backend && npm run migrate
 
+      - name: Seed smoke DB (creates admin@internops.com / Admin@123)
+        run: cd backend && npm run seed
+
       - name: Start backend in background
         run: |
           cd backend
